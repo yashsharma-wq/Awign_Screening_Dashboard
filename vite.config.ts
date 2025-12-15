@@ -15,4 +15,10 @@ export default defineConfig(({ mode }) => ({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  optimizeDeps: {
+    include: ["mammoth", "html2pdf.js"],
+    esbuildOptions: {
+      target: "es2020",
+    },
+  },
 }));

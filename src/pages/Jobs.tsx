@@ -22,10 +22,11 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Loader2, Briefcase, MapPin, Clock, Upload, FileSpreadsheet, RefreshCw } from "lucide-react";
+import { Plus, Loader2, Briefcase, MapPin, Clock, Upload, FileSpreadsheet, RefreshCw, FileText, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { JobDetailDialog } from "@/components/JobDetailDialog";
 import type { Tables, TablesInsert } from "@/integrations/supabase/types";
+// Using dynamic imports for better Vite compatibility with CommonJS modules
 
 type Job = Tables<"AEX_Job_Data">;
 type JobInsert = TablesInsert<"AEX_Job_Data">;
@@ -39,6 +40,9 @@ const Jobs = () => {
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const jdFileInputRef = useRef<HTMLInputElement>(null);
+  const [jdFile, setJdFile] = useState<File | null>(null);
+  const [uploadingJd, setUploadingJd] = useState(false);
   const { toast } = useToast();
 
   const [formData, setFormData] = useState({
@@ -163,21 +167,35 @@ const Jobs = () => {
         return;
       }
 
-      if (!formData.jdContext || !formData.jdContext.trim()) {
+      if (!formData.candidateMonthlyCtc || !formData.candidateMonthlyCtc.trim()) {
         toast({
           title: "Validation Error",
-          description: "Brief context about the role (JD) is required",
+          description: "Annual CTC is required",
           variant: "destructive",
         });
         setSubmitting(false);
         return;
       }
 
-      // Validate JD is a valid URL
-      if (!isValidUrl(formData.jdContext.trim())) {
+      // Validate JD file is uploaded
+      if (!jdFile) {
         toast({
           title: "Validation Error",
-          description: "Brief context about the role (JD) must be a valid file URL (http:// or https://)",
+          description: "Please upload a JD file (.docx or .pdf)",
+          variant: "destructive",
+        });
+        setSubmitting(false);
+        return;
+      }
+
+      // Upload JD file and get public URL
+      let jdUrl: string;
+      try {
+        jdUrl = await uploadJdFile(jdFile);
+      } catch (error: any) {
+        toast({
+          title: "Upload Error",
+          description: error.message || "Failed to upload JD file. Please try again.",
           variant: "destructive",
         });
         setSubmitting(false);
@@ -205,16 +223,18 @@ const Jobs = () => {
         return;
       }
 
+      const annualCtc = formData.candidateMonthlyCtc.trim();
+
       const jobData: JobInsert = {
         "Role Code": formData.roleCode.trim(),
         "Role Name": formData.roleName.trim(),
         "Status": formData.status || "active",
         "Location": formData.location.trim(),
-        "Brief context about the role (JD)": formData.jdContext.trim(),
+        "Brief context about the role (JD)": jdUrl,
         "Current Updates": formData.currentUpdates || null,
         "Minimum Experience": formData.minimumExperience || null,
         "Duration": formData.duration || null,
-        "Candidate Monthly CTC": formData.candidateMonthlyCtc || null,
+        "Candidate Monthly CTC": annualCtc,
         "Skills": formData.skills || null,
       };
 
@@ -253,6 +273,181 @@ const Jobs = () => {
       candidateMonthlyCtc: "",
       skills: "",
     });
+    setJdFile(null);
+    if (jdFileInputRef.current) {
+      jdFileInputRef.current.value = "";
+    }
+  };
+
+  const convertDocxToPdf = async (file: File): Promise<Blob> => {
+    try {
+      // Load mammoth from CDN (avoids Vite CommonJS resolution issues)
+      let mammoth: any;
+      if (typeof window !== 'undefined' && (window as any).mammoth) {
+        mammoth = (window as any).mammoth;
+      } else {
+        // Load mammoth from CDN
+        await new Promise<void>((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/mammoth@1.11.0/mammoth.browser.min.js';
+          script.onload = () => {
+            mammoth = (window as any).mammoth;
+            resolve();
+          };
+          script.onerror = () => reject(new Error('Failed to load mammoth from CDN'));
+          document.head.appendChild(script);
+        });
+      }
+      
+      // Load html2pdf from CDN (avoids Vite CommonJS resolution issues)
+      let html2pdf: any;
+      if (typeof window !== 'undefined' && (window as any).html2pdf) {
+        html2pdf = (window as any).html2pdf;
+      } else {
+        // Load html2pdf from CDN
+        await new Promise<void>((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/html2pdf.js@0.12.1/dist/html2pdf.bundle.min.js';
+          script.onload = () => {
+            html2pdf = (window as any).html2pdf;
+            resolve();
+          };
+          script.onerror = () => reject(new Error('Failed to load html2pdf from CDN'));
+          document.head.appendChild(script);
+        });
+      }
+
+      const arrayBuffer = await file.arrayBuffer();
+      const result = await mammoth.convertToHtml({ arrayBuffer });
+      const html = result.value;
+
+      // Create a temporary container for the HTML
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      container.style.padding = "20px";
+      container.style.fontFamily = "Arial, sans-serif";
+
+      // Convert HTML to PDF
+      const opt = {
+        margin: [10, 10, 10, 10],
+        filename: file.name.replace(/\.[^/.]+$/, "") + ".pdf",
+        image: { type: "jpeg", quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+      };
+
+      const pdfBlob = await html2pdf().set(opt).from(container).outputPdf("blob");
+      return pdfBlob;
+    } catch (error: any) {
+      console.error("Error converting file to PDF:", error);
+      throw new Error(`Failed to convert file to PDF: ${error.message}`);
+    }
+  };
+
+  const uploadJdFile = async (file: File): Promise<string> => {
+    try {
+      setUploadingJd(true);
+      
+      // Convert docx to PDF (doc files are not supported by mammoth)
+      let pdfBlob: Blob;
+      const fileExtension = file.name.split(".").pop()?.toLowerCase();
+      
+      if (fileExtension === "docx") {
+        pdfBlob = await convertDocxToPdf(file);
+      } else if (fileExtension === "pdf") {
+        pdfBlob = file;
+      } else {
+        throw new Error("Unsupported file format. Please upload a .docx or .pdf file.");
+      }
+
+      // Generate unique filename
+      const timestamp = Date.now();
+      const sanitizedFileName = file.name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9-_]/g, "_");
+      const pdfFileName = `${sanitizedFileName}_${timestamp}.pdf`;
+      const filePath = `Job_Data/${pdfFileName}`;
+
+      // Get current user to ensure authentication
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError || !user) {
+        throw new Error("You must be logged in to upload files. Please log in and try again.");
+      }
+
+      // Upload to Supabase storage
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from("User_File_Uploads")
+        .upload(filePath, pdfBlob, {
+          contentType: "application/pdf",
+          upsert: false,
+        });
+
+      if (uploadError) {
+        console.error("Storage upload error:", uploadError);
+        // Provide helpful error message for RLS issues
+        if (uploadError.message?.includes("new row violates row-level security") || 
+            uploadError.message?.includes("row-level security") ||
+            uploadError.message?.includes("policy") ||
+            uploadError.statusCode === "403") {
+          throw new Error(
+            "Storage bucket RLS policy error. Please ensure:\n" +
+            "1. The 'User_File_Uploads' bucket exists in Supabase Storage\n" +
+            "2. RLS policies allow authenticated users to INSERT/UPDATE files\n" +
+            "3. The bucket is configured to allow public access or has proper policies\n\n" +
+            "See the console for more details."
+          );
+        }
+        throw uploadError;
+      }
+
+      // Get public URL
+      const { data: urlData } = supabase.storage
+        .from("User_File_Uploads")
+        .getPublicUrl(filePath);
+
+      return urlData.publicUrl;
+    } catch (error: any) {
+      console.error("Error uploading JD file:", error);
+      throw error;
+    } finally {
+      setUploadingJd(false);
+    }
+  };
+
+  const handleJdFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) {
+      setJdFile(null);
+      setFormData({ ...formData, jdContext: "" });
+      return;
+    }
+
+    // Validate file type
+    const fileExtension = file.name.split(".").pop()?.toLowerCase();
+    if (!["docx", "pdf"].includes(fileExtension || "")) {
+      toast({
+        title: "Invalid File Type",
+        description: "Please upload a .docx or .pdf file.",
+        variant: "destructive",
+      });
+      if (jdFileInputRef.current) {
+        jdFileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      toast({
+        title: "File Too Large",
+        description: "File size must be less than 10MB.",
+        variant: "destructive",
+      });
+      if (jdFileInputRef.current) {
+        jdFileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    setJdFile(file);
   };
 
   const handleCsvUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -318,6 +513,7 @@ const Jobs = () => {
         const roleName = row["Role Name"]?.trim();
         const location = row["Location"]?.trim();
         const jdContext = row["Brief context about the role (JD)"]?.trim();
+        const candidateMonthlyCtc = row["Candidate Monthly CTC"]?.trim?.();
 
         // Validate required fields
         if (!roleCode) {
@@ -413,6 +609,22 @@ const Jobs = () => {
           toast({
             title: `Row ${rowNumber} Skipped`,
             description: "Brief context about the role (JD) must be a valid file URL (http:// or https://)",
+            variant: "destructive",
+          });
+          continue;
+        }
+
+        if (!candidateMonthlyCtc) {
+          resultRows.push({
+            originalLine: lines[i],
+            rowNumber,
+            status: "INVALID",
+            reason: "Missing Annual CTC",
+            data: row,
+          });
+          toast({
+            title: `Row ${rowNumber} Skipped`,
+            description: "Missing required field: Annual CTC",
             variant: "destructive",
           });
           continue;
@@ -685,12 +897,13 @@ const Jobs = () => {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="candidateMonthlyCtc">Candidate Monthly CTC</Label>
+                    <Label htmlFor="candidateMonthlyCtc">Annual CTC *</Label>
                     <Input
                       id="candidateMonthlyCtc"
                       value={formData.candidateMonthlyCtc}
                       onChange={(e) => setFormData({ ...formData, candidateMonthlyCtc: e.target.value })}
                       placeholder="e.g., 50000"
+                      required
                     />
                   </div>
                   <div className="space-y-2">
@@ -703,16 +916,67 @@ const Jobs = () => {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="jdContext">Brief context about the role (JD) *</Label>
-                    <Input
-                      id="jdContext"
-                      type="url"
-                      value={formData.jdContext}
-                      onChange={(e) => setFormData({ ...formData, jdContext: e.target.value })}
-                      placeholder="https://example.com/jd.pdf"
-                      required
-                    />
-                    <p className="text-xs text-muted-foreground">Enter a valid file URL (http:// or https://)</p>
+                    <Label htmlFor="jdFile">Brief context about the role (JD) *</Label>
+                    <div className="space-y-2">
+                      <input
+                        ref={jdFileInputRef}
+                        type="file"
+                        id="jdFile"
+                        accept=".docx,.pdf"
+                        onChange={handleJdFileChange}
+                        className="hidden"
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => jdFileInputRef.current?.click()}
+                          disabled={uploadingJd || submitting}
+                          className="flex-1"
+                        >
+                          {uploadingJd ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              Processing...
+                            </>
+                          ) : (
+                            <>
+                              <Upload className="mr-2 h-4 w-4" />
+                              {jdFile ? "Change File" : "Upload JD File"}
+                            </>
+                          )}
+                        </Button>
+                        {jdFile && !uploadingJd && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              setJdFile(null);
+                              if (jdFileInputRef.current) {
+                                jdFileInputRef.current.value = "";
+                              }
+                            }}
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
+                      {jdFile && (
+                        <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
+                          <FileText className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-sm text-muted-foreground truncate flex-1">
+                            {jdFile.name}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {(jdFile.size / 1024).toFixed(2)} KB
+                          </span>
+                        </div>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Upload a .docx or .pdf file (max 10MB). .docx files will be converted to PDF automatically.
+                      </p>
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="currentUpdates">Current Updates</Label>
@@ -722,9 +986,9 @@ const Jobs = () => {
                       onChange={(e) => setFormData({ ...formData, currentUpdates: e.target.value })}
                     />
                   </div>
-                  <Button type="submit" className="w-full" disabled={submitting}>
-                    {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    Add Job
+                  <Button type="submit" className="w-full" disabled={submitting || uploadingJd}>
+                    {(submitting || uploadingJd) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    {uploadingJd ? "Uploading JD..." : submitting ? "Adding Job..." : "Add Job"}
                   </Button>
                 </form>
               </TabsContent>
@@ -741,7 +1005,7 @@ const Jobs = () => {
                       Required columns: Role Code*, Role Name*, Location*, Brief context about the role (JD)*
                     </p>
                     <p className="text-xs text-muted-foreground mb-4 font-mono bg-muted p-2 rounded">
-                      Optional columns: Status, Current Updates, Minimum Experience, Duration, Candidate Monthly CTC, Skills
+                      Optional columns: Status, Current Updates, Minimum Experience, Duration, Annual CTC, Skills
                     </p>
                     <p className="text-xs text-muted-foreground mb-4">
                       *Brief context about the role (JD) must be a valid file URL (http:// or https://)

@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, FileSearch, Play, RefreshCw } from "lucide-react";
+import { Loader2, FileSearch, Play, RefreshCw, ArrowUpDown } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { Tables } from "@/integrations/supabase/types";
 
@@ -34,14 +34,17 @@ type CandidateRow = {
   "Candidate Email ID": string | null;
   "JD_Mapping": string | null;
   Score?: string | null;
+  created_at?: string | null;
 };
 
-type CVMatchingRow = Tables<"AEX_CV_Matching">;
+type ResumeScoringRow = Tables<"AEX_CV_Matching">;
 type Job = Tables<"AEX_Job_Data">;
 
-const CVMapping = () => {
-  const [cvMatchingData, setCvMatchingData] = useState<CVMatchingRow[]>([]);
+const ResumeScoring = () => {
+  const [resumeScoringData, setResumeScoringData] = useState<ResumeScoringRow[]>([]);
+  const [candidateNamesMap, setCandidateNamesMap] = useState<Map<string, string>>(new Map());
   const [pendingCandidates, setPendingCandidates] = useState<CandidateRow[]>([]);
+  const [filteredPendingCandidates, setFilteredPendingCandidates] = useState<CandidateRow[]>([]);
   const [allScreeningCandidates, setAllScreeningCandidates] = useState<CandidateRow[]>([]);
   const [filteredScreeningCandidates, setFilteredScreeningCandidates] = useState<CandidateRow[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -56,12 +59,16 @@ const CVMapping = () => {
   const [activeTab, setActiveTab] = useState("tracker");
   const { toast } = useToast();
 
-  // Filter states
+  // Filter states for pending tab
+  const [pendingRoleCodeFilter, setPendingRoleCodeFilter] = useState<string>("all");
+  const [pendingSortOrder, setPendingSortOrder] = useState<"asc" | "desc">("desc");
+
+  // Filter states for screening tab
   const [scoreMin, setScoreMin] = useState<string>("");
   const [scoreMax, setScoreMax] = useState<string>("");
   const [selectedRoleCode, setSelectedRoleCode] = useState<string>("all");
 
-  const fetchCVMatchingData = async () => {
+  const fetchResumeScoringData = async () => {
     setLoadingTracker(true);
     try {
       const { data, error } = await supabase
@@ -72,16 +79,33 @@ const CVMapping = () => {
       if (error) {
         toast({
           title: "Error",
-          description: "Failed to fetch CV matching data",
+          description: "Failed to fetch Resume Scoring data",
           variant: "destructive",
         });
       } else {
-        setCvMatchingData(data || []);
+        setResumeScoringData(data || []);
+        
+        // Fetch candidate names for all Application IDs
+        const applicationIds = (data || []).map(row => row["Application ID"]).filter((id): id is string => id !== null);
+        if (applicationIds.length > 0) {
+          const { data: candidatesData } = await supabase
+            .from("AEX_Candidate_Data")
+            .select('"Application ID", "Candidate Name"')
+            .in("Application ID", applicationIds);
+          
+          const namesMap = new Map<string, string>();
+          (candidatesData || []).forEach(candidate => {
+            if (candidate["Application ID"] && candidate["Candidate Name"]) {
+              namesMap.set(candidate["Application ID"], candidate["Candidate Name"]);
+            }
+          });
+          setCandidateNamesMap(namesMap);
+        }
       }
     } catch (error: any) {
       toast({
         title: "Error",
-        description: error.message || "Failed to fetch CV matching data",
+        description: error.message || "Failed to fetch Resume Scoring data",
         variant: "destructive",
       });
     } finally {
@@ -94,8 +118,9 @@ const CVMapping = () => {
     try {
       const { data, error } = await supabase
         .from("AEX_Candidate_Data")
-        .select('id, "Application ID", "Candidate Name", "Role Code", "Job Applied", "Candidate Email ID", "JD_Mapping"')
-        .eq("JD_Mapping", "NOT STARTED");
+        .select('id, "Application ID", "Candidate Name", "Role Code", "Job Applied", "Candidate Email ID", "JD_Mapping", created_at')
+        .eq("JD_Mapping", "NOT STARTED")
+        .order("created_at", { ascending: false });
 
       if (error) {
         toast({
@@ -105,11 +130,40 @@ const CVMapping = () => {
         });
       } else {
         setPendingCandidates(data || []);
+        applyPendingFilters(data || [], pendingRoleCodeFilter, pendingSortOrder);
       }
     } finally {
       setLoadingPending(false);
     }
   };
+
+  const applyPendingFilters = (
+    candidates: CandidateRow[],
+    roleCode: string,
+    sortOrder: "asc" | "desc"
+  ) => {
+    let filtered = [...candidates];
+
+    // Filter by Role Code
+    if (roleCode !== "all") {
+      filtered = filtered.filter((c) => c["Role Code"] === roleCode);
+    }
+
+    // Sort by Date added (created_at)
+    filtered.sort((a, b) => {
+      const dateA = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const dateB = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return sortOrder === "asc" ? dateA - dateB : dateB - dateA;
+    });
+
+    setFilteredPendingCandidates(filtered);
+  };
+
+  useEffect(() => {
+    if (activeTab === "pending") {
+      applyPendingFilters(pendingCandidates, pendingRoleCodeFilter, pendingSortOrder);
+    }
+  }, [pendingRoleCodeFilter, pendingSortOrder, pendingCandidates, activeTab]);
 
   const fetchScreeningCandidates = async () => {
     setLoadingScreening(true);
@@ -124,18 +178,18 @@ const CVMapping = () => {
         throw candidatesError;
       }
 
-      // Fetch CV matching data to get scores
-      const { data: cvData, error: cvError } = await supabase
+      // Fetch Resume Scoring data to get scores
+      const { data: scoringData, error: scoringError } = await supabase
         .from("AEX_CV_Matching")
         .select('"Application ID", "Score"');
 
-      if (cvError) {
-        throw cvError;
+      if (scoringError) {
+        throw scoringError;
       }
 
       // Create a map of Application ID to Score
       const scoreMap = new Map<string, string>();
-      cvData?.forEach((row) => {
+      scoringData?.forEach((row) => {
         if (row["Application ID"] && row["Score"]) {
           scoreMap.set(row["Application ID"], row["Score"]);
         }
@@ -215,7 +269,7 @@ const CVMapping = () => {
   const fetchAll = async () => {
     setLoading(true);
     await Promise.all([
-      fetchCVMatchingData(),
+      fetchResumeScoringData(),
       fetchPendingCandidates(),
       fetchScreeningCandidates(),
       fetchJobs(),
@@ -229,7 +283,7 @@ const CVMapping = () => {
 
   const handleSelectAllPending = (checked: boolean) => {
     if (checked) {
-      setSelectedPendingIds(pendingCandidates.map((c) => c.id));
+      setSelectedPendingIds(filteredPendingCandidates.map((c) => c.id));
     } else {
       setSelectedPendingIds([]);
     }
@@ -259,7 +313,7 @@ const CVMapping = () => {
     }
   };
 
-  const handlePerformMapping = async () => {
+  const handlePerformScoring = async () => {
     if (selectedPendingIds.length === 0) {
       toast({
         title: "No selection",
@@ -281,32 +335,16 @@ const CVMapping = () => {
         throw updateError;
       }
 
-      // // Step 2: Call the webhook
-      // const response = await fetch(
-      //   "https://awign-pm-dev.app.n8n.cloud/webhook/c7555a20-201d-4812-8260-b6c602659c20",
-      //   {
-      //     method: "POST",
-      //     headers: {
-      //       "Content-Type": "application/json",
-      //     },
-      //     body: JSON.stringify({ action: "perform_jd_mapping" }),
-      //   }
-      // );
-
-      // if (!response.ok) {
-      //   throw new Error("Webhook call failed");
-      // }
-
       toast({
         title: "Success",
-        description: `${selectedPendingIds.length} candidate(s) marked as STARTED and CV Mapping workflow triggered`,
+        description: `${selectedPendingIds.length} candidate(s) marked as STARTED and Resume Scoring workflow triggered`,
       });
       setSelectedPendingIds([]);
       await fetchPendingCandidates();
     } catch (error: any) {
       toast({
         title: "Error",
-        description: error.message || "Failed to perform CV mapping",
+        description: error.message || "Failed to perform Resume Scoring",
         variant: "destructive",
       });
     } finally {
@@ -385,10 +423,6 @@ const CVMapping = () => {
     }
   };
 
-  const handleFilterChange = () => {
-    applyFilters(allScreeningCandidates, scoreMin, scoreMax, selectedRoleCode);
-  };
-
   const handleResetFilters = () => {
     setScoreMin("");
     setScoreMax("");
@@ -396,7 +430,7 @@ const CVMapping = () => {
     applyFilters(allScreeningCandidates, "", "", "all");
   };
 
-  const allPendingSelected = pendingCandidates.length > 0 && selectedPendingIds.length === pendingCandidates.length;
+  const allPendingSelected = filteredPendingCandidates.length > 0 && selectedPendingIds.length === filteredPendingCandidates.length;
   const allScreeningSelected = filteredScreeningCandidates.length > 0 && selectedScreeningIds.length === filteredScreeningCandidates.length;
 
   // Get unique role codes from jobs
@@ -407,16 +441,16 @@ const CVMapping = () => {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-foreground">CV Mapping</h1>
+        <h1 className="text-2xl font-bold text-foreground">Resume Scoring</h1>
         <p className="text-muted-foreground">
-          Manage CV mapping and screening workflows for candidates
+          Manage Resume Scoring and screening workflows for candidates
         </p>
       </div>
 
       <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="tracker">CV Mapping Tracker</TabsTrigger>
-          <TabsTrigger value="pending">Pending CV Mapping</TabsTrigger>
+          <TabsTrigger value="tracker">Resume Scoring Tracker</TabsTrigger>
+          <TabsTrigger value="pending">Pending Resume Scoring</TabsTrigger>
           <TabsTrigger value="screening">Screening Pending</TabsTrigger>
         </TabsList>
 
@@ -424,11 +458,11 @@ const CVMapping = () => {
           <div className="flex items-center justify-between">
             <Card>
               <CardContent className="px-4 py-2">
-                <div className="text-sm text-muted-foreground">Total: <span className="font-semibold text-foreground">{cvMatchingData.length}</span></div>
+                <div className="text-sm text-muted-foreground">Total: <span className="font-semibold text-foreground">{resumeScoringData.length}</span></div>
               </CardContent>
             </Card>
             <Button
-              onClick={fetchCVMatchingData}
+              onClick={fetchResumeScoringData}
               disabled={loadingTracker}
               variant="outline"
             >
@@ -443,9 +477,9 @@ const CVMapping = () => {
 
           <Card>
             <CardHeader>
-              <CardTitle>CV Mapping Tracker</CardTitle>
+              <CardTitle>Resume Scoring Tracker</CardTitle>
               <CardDescription>
-                Complete details of CV matching results from AEX_CV_Matching table
+                Complete details of Resume Scoring results from AEX_CV_Matching table
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -453,9 +487,9 @@ const CVMapping = () => {
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
-              ) : cvMatchingData.length === 0 ? (
+              ) : resumeScoringData.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
-                  No CV matching data available
+                  No Resume Scoring data available
                 </div>
               ) : (
                 <div className="rounded-md border overflow-x-auto">
@@ -463,6 +497,7 @@ const CVMapping = () => {
                     <TableHeader>
                       <TableRow>
                         <TableHead>Application ID</TableHead>
+                        <TableHead>Candidate Name</TableHead>
                         <TableHead>Role Code</TableHead>
                         <TableHead>Score</TableHead>
                         <TableHead className="min-w-[300px]">JD Summary</TableHead>
@@ -470,10 +505,13 @@ const CVMapping = () => {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {cvMatchingData.map((row) => (
+                      {resumeScoringData.map((row) => (
                         <TableRow key={row.id}>
                           <TableCell className="font-medium font-mono text-sm">
                             {row["Application ID"] || "-"}
+                          </TableCell>
+                          <TableCell>
+                            {candidateNamesMap.get(row["Application ID"] || "") || "-"}
                           </TableCell>
                           <TableCell>{row["Role Code"] || "-"}</TableCell>
                           <TableCell>
@@ -504,51 +542,88 @@ const CVMapping = () => {
         </TabsContent>
 
         <TabsContent value="pending" className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col gap-4">
             <Card>
-              <CardContent className="px-4 py-2">
-                <div className="text-sm text-muted-foreground">Total: <span className="font-semibold text-foreground">{pendingCandidates.length}</span></div>
+              <CardHeader>
+                <CardTitle>Filters</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="space-y-2">
+                    <Label>Role Code</Label>
+                    <Select value={pendingRoleCodeFilter} onValueChange={setPendingRoleCodeFilter}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select Role Code" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="all">All</SelectItem>
+                        {uniqueRoleCodes.map((roleCode) => (
+                          <SelectItem key={roleCode} value={roleCode}>
+                            {roleCode}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Sort by Date Added</Label>
+                    <Select value={pendingSortOrder} onValueChange={(value) => setPendingSortOrder(value as "asc" | "desc")}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="desc">Newest First</SelectItem>
+                        <SelectItem value="asc">Oldest First</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
               </CardContent>
             </Card>
-            <div className="flex gap-2">
-              <Button
-                onClick={fetchPendingCandidates}
-                disabled={loadingPending}
-                variant="outline"
-              >
-                {loadingPending ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                )}
-                Refresh
-              </Button>
-              <Button
-                onClick={handlePerformMapping}
-                disabled={selectedPendingIds.length === 0 || processing}
-              >
-                {processing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                <FileSearch className="mr-2 h-4 w-4" />
-                Perform Mapping ({selectedPendingIds.length})
-              </Button>
+
+            <div className="flex items-center justify-between">
+              <Card>
+                <CardContent className="px-4 py-2">
+                  <div className="text-sm text-muted-foreground">Total: <span className="font-semibold text-foreground">{filteredPendingCandidates.length}</span></div>
+                </CardContent>
+              </Card>
+              <div className="flex gap-2">
+                <Button
+                  onClick={fetchPendingCandidates}
+                  disabled={loadingPending}
+                  variant="outline"
+                >
+                  {loadingPending ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                  )}
+                  Refresh
+                </Button>
+                <Button
+                  onClick={handlePerformScoring}
+                  disabled={selectedPendingIds.length === 0 || processing}
+                >
+                  {processing && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  <FileSearch className="mr-2 h-4 w-4" />
+                  Perform Scoring ({selectedPendingIds.length})
+                </Button>
+              </div>
             </div>
           </div>
 
           <Card>
             <CardHeader>
-              <CardTitle>Candidates Pending CV Mapping</CardTitle>
-              <CardDescription>
-                Showing candidates with JD_Mapping status = "NOT STARTED"
-              </CardDescription>
+              <CardTitle>Candidates Pending Resume Scoring</CardTitle>
             </CardHeader>
             <CardContent>
               {loadingPending ? (
                 <div className="flex items-center justify-center py-8">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
-              ) : pendingCandidates.length === 0 ? (
+              ) : filteredPendingCandidates.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
-                  No candidates pending CV mapping
+                  No candidates pending Resume Scoring
                 </div>
               ) : (
                 <div className="rounded-md border">
@@ -566,10 +641,11 @@ const CVMapping = () => {
                         <TableHead>Role Code</TableHead>
                         <TableHead>Job Applied</TableHead>
                         <TableHead>Email</TableHead>
+                        <TableHead>Date Added</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {pendingCandidates.map((candidate) => (
+                      {filteredPendingCandidates.map((candidate) => (
                         <TableRow key={candidate.id}>
                           <TableCell>
                             <Checkbox
@@ -586,6 +662,11 @@ const CVMapping = () => {
                           <TableCell>{candidate["Role Code"] || "-"}</TableCell>
                           <TableCell>{candidate["Job Applied"] || "-"}</TableCell>
                           <TableCell>{candidate["Candidate Email ID"] || "-"}</TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {candidate.created_at
+                              ? new Date(candidate.created_at).toLocaleDateString()
+                              : "-"}
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -765,4 +846,7 @@ const CVMapping = () => {
   );
 };
 
-export default CVMapping;
+export default ResumeScoring;
+
+
+

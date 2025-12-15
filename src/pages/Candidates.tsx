@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Loader2, Users, Mail, Phone, Upload, FileSpreadsheet, RefreshCw } from "lucide-react";
+import { Plus, Loader2, Users, Mail, Phone, Upload, FileSpreadsheet, RefreshCw, FileText, X } from "lucide-react";
 import type { Tables } from "@/integrations/supabase/types";
 import {
   Table,
@@ -80,6 +80,9 @@ const Candidates = () => {
   const [selectedCandidate, setSelectedCandidate] = useState<AEXCandidate | null>(null);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const resumeFileInputRef = useRef<HTMLInputElement>(null);
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [uploadingResume, setUploadingResume] = useState(false);
   const { toast } = useToast();
 
   const [formData, setFormData] = useState({
@@ -317,11 +320,248 @@ const Candidates = () => {
     );
   };
 
+  const convertDocxToPdf = async (file: File): Promise<Blob> => {
+    try {
+      // Load mammoth from CDN (avoids Vite CommonJS resolution issues)
+      let mammoth: any;
+      if (typeof window !== 'undefined' && (window as any).mammoth) {
+        mammoth = (window as any).mammoth;
+      } else {
+        // Load mammoth from CDN
+        await new Promise<void>((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/mammoth@1.11.0/mammoth.browser.min.js';
+          script.onload = () => {
+            mammoth = (window as any).mammoth;
+            resolve();
+          };
+          script.onerror = () => reject(new Error('Failed to load mammoth from CDN'));
+          document.head.appendChild(script);
+        });
+      }
+      
+      // Load html2pdf from CDN (avoids Vite CommonJS resolution issues)
+      let html2pdf: any;
+      if (typeof window !== 'undefined' && (window as any).html2pdf) {
+        html2pdf = (window as any).html2pdf;
+      } else {
+        // Load html2pdf from CDN
+        await new Promise<void>((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdn.jsdelivr.net/npm/html2pdf.js@0.12.1/dist/html2pdf.bundle.min.js';
+          script.onload = () => {
+            html2pdf = (window as any).html2pdf;
+            resolve();
+          };
+          script.onerror = () => reject(new Error('Failed to load html2pdf from CDN'));
+          document.head.appendChild(script);
+        });
+      }
+
+      const arrayBuffer = await file.arrayBuffer();
+      const result = await mammoth.convertToHtml({ arrayBuffer });
+      const html = result.value;
+
+      // Create a temporary container for the HTML
+      const container = document.createElement("div");
+      container.innerHTML = html;
+      container.style.padding = "20px";
+      container.style.fontFamily = "Arial, sans-serif";
+
+      // Convert HTML to PDF
+      const opt = {
+        margin: [10, 10, 10, 10],
+        filename: file.name.replace(/\.[^/.]+$/, "") + ".pdf",
+        image: { type: "jpeg", quality: 0.98 },
+        html2canvas: { scale: 2, useCORS: true },
+        jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+      };
+
+      const pdfBlob = await html2pdf().set(opt).from(container).outputPdf("blob");
+      return pdfBlob;
+    } catch (error: any) {
+      console.error("Error converting file to PDF:", error);
+      throw new Error(`Failed to convert file to PDF: ${error.message}`);
+    }
+  };
+
+  const uploadResumeFile = async (file: File): Promise<string> => {
+    try {
+      setUploadingResume(true);
+      
+      // Convert docx to PDF (doc files are not supported by mammoth)
+      let pdfBlob: Blob;
+      const fileExtension = file.name.split(".").pop()?.toLowerCase();
+      
+      if (fileExtension === "docx") {
+        pdfBlob = await convertDocxToPdf(file);
+      } else if (fileExtension === "pdf") {
+        pdfBlob = file;
+      } else {
+        throw new Error("Unsupported file format. Please upload a .docx or .pdf file.");
+      }
+
+      // Get current user to ensure authentication
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError || !user) {
+        throw new Error("You must be logged in to upload files. Please log in and try again.");
+      }
+
+      // Generate unique filename
+      const timestamp = Date.now();
+      const sanitizedFileName = file.name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9-_]/g, "_");
+      const pdfFileName = `${sanitizedFileName}_${timestamp}.pdf`;
+      const filePath = `Candidate_Data/${pdfFileName}`;
+
+      // Upload to Supabase storage
+      const { data: uploadData, error: uploadError } = await supabase.storage
+        .from("User_File_Uploads")
+        .upload(filePath, pdfBlob, {
+          contentType: "application/pdf",
+          upsert: false,
+        });
+
+      if (uploadError) {
+        console.error("Storage upload error:", uploadError);
+        // Provide helpful error message for RLS issues
+        if (uploadError.message?.includes("new row violates row-level security") || 
+            uploadError.message?.includes("row-level security") ||
+            uploadError.message?.includes("policy") ||
+            uploadError.statusCode === "403") {
+          throw new Error(
+            "Storage bucket RLS policy error. Please ensure:\n" +
+            "1. The 'User_File_Uploads' bucket exists in Supabase Storage\n" +
+            "2. RLS policies allow authenticated users to INSERT/UPDATE files\n" +
+            "3. The bucket is configured to allow public access or has proper policies\n\n" +
+            "See the console for more details."
+          );
+        }
+        throw uploadError;
+      }
+
+      // Get public URL
+      const { data: urlData } = supabase.storage
+        .from("User_File_Uploads")
+        .getPublicUrl(filePath);
+
+      return urlData.publicUrl;
+    } catch (error: any) {
+      console.error("Error uploading resume file:", error);
+      throw error;
+    } finally {
+      setUploadingResume(false);
+    }
+  };
+
+  const handleResumeFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) {
+      setResumeFile(null);
+      setFormData({ ...formData, candidateResume: "" });
+      return;
+    }
+
+    // Validate file type
+    const fileExtension = file.name.split(".").pop()?.toLowerCase();
+    if (!["docx", "pdf"].includes(fileExtension || "")) {
+      toast({
+        title: "Invalid File Type",
+        description: "Please upload a .docx or .pdf file.",
+        variant: "destructive",
+      });
+      if (resumeFileInputRef.current) {
+        resumeFileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      toast({
+        title: "File Too Large",
+        description: "File size must be less than 10MB.",
+        variant: "destructive",
+      });
+      if (resumeFileInputRef.current) {
+        resumeFileInputRef.current.value = "";
+      }
+      return;
+    }
+
+    setResumeFile(file);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
 
     try {
+      // Validate required fields
+      if (!formData.candidateName || !formData.candidateName.trim()) {
+        toast({
+          title: "Validation Error",
+          description: "Candidate Name is required",
+          variant: "destructive",
+        });
+        setSubmitting(false);
+        return;
+      }
+
+      if (!formData.roleCode || !formData.roleCode.trim()) {
+        toast({
+          title: "Validation Error",
+          description: "Role Code is required",
+          variant: "destructive",
+        });
+        setSubmitting(false);
+        return;
+      }
+
+      if (!formData.candidateContactNumber || !formData.candidateContactNumber.trim()) {
+        toast({
+          title: "Validation Error",
+          description: "Contact Number is required",
+          variant: "destructive",
+        });
+        setSubmitting(false);
+        return;
+      }
+
+      if (!formData.candidateEmail || !formData.candidateEmail.trim()) {
+        toast({
+          title: "Validation Error",
+          description: "Email ID is required",
+          variant: "destructive",
+        });
+        setSubmitting(false);
+        return;
+      }
+
+      // Validate resume file is uploaded
+      if (!resumeFile) {
+        toast({
+          title: "Validation Error",
+          description: "Please upload a resume file (.docx or .pdf)",
+          variant: "destructive",
+        });
+        setSubmitting(false);
+        return;
+      }
+
+      // Upload resume file and get public URL
+      let resumeUrl: string;
+      try {
+        resumeUrl = await uploadResumeFile(resumeFile);
+      } catch (error: any) {
+        toast({
+          title: "Upload Error",
+          description: error.message || "Failed to upload resume file. Please try again.",
+          variant: "destructive",
+        });
+        setSubmitting(false);
+        return;
+      }
+
       // Check if Contact Number + Role Code already exists
       if (formData.candidateContactNumber && formData.roleCode) {
         const { data: existing, error: checkError } = await supabase
@@ -361,7 +601,7 @@ const Candidates = () => {
         "Current CTC": formData.currentCtc || null,
         "Candidate Salary Expectation": formData.salaryExpectation || null,
         "Current Location": formData.currentLocation || null,
-        "Candidate Resume": formData.candidateResume || null,
+        "Candidate Resume": resumeUrl,
         "Job Applied": formData.jobApplied || null,
         "Skills": formData.skills || null,
         "Documents": formData.documents || null,
@@ -391,6 +631,10 @@ const Candidates = () => {
         skills: "",
         documents: "",
       });
+      setResumeFile(null);
+      if (resumeFileInputRef.current) {
+        resumeFileInputRef.current.value = "";
+      }
       fetchCandidates();
     } catch (error: any) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -596,7 +840,7 @@ const Candidates = () => {
                       <Input value={formData.candidateName} onChange={(e) => setFormData({ ...formData, candidateName: e.target.value })} required />
                     </div>
                     <div className="space-y-2">
-                      <Label>Role Code</Label>
+                      <Label>Role Code *</Label>
                       <Select
                         value={formData.roleCode}
                         onValueChange={(value) => {
@@ -607,6 +851,7 @@ const Candidates = () => {
                             jobApplied: selectedJob?.["Role Name"] || "",
                           });
                         }}
+                        required
                       >
                         <SelectTrigger>
                           <SelectValue placeholder="Select Role Code" />
@@ -624,12 +869,12 @@ const Candidates = () => {
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label>Email ID</Label>
-                      <Input type="email" value={formData.candidateEmail} onChange={(e) => setFormData({ ...formData, candidateEmail: e.target.value })} />
+                      <Label>Email ID *</Label>
+                      <Input type="email" value={formData.candidateEmail} onChange={(e) => setFormData({ ...formData, candidateEmail: e.target.value })} required />
                     </div>
                     <div className="space-y-2">
-                      <Label>Contact Number</Label>
-                      <Input value={formData.candidateContactNumber} onChange={(e) => setFormData({ ...formData, candidateContactNumber: e.target.value })} />
+                      <Label>Contact Number *</Label>
+                      <Input value={formData.candidateContactNumber} onChange={(e) => setFormData({ ...formData, candidateContactNumber: e.target.value })} required />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
@@ -679,16 +924,75 @@ const Candidates = () => {
                     <Input value={formData.skills} onChange={(e) => setFormData({ ...formData, skills: e.target.value })} placeholder="React, TypeScript, Node.js" />
                   </div>
                   <div className="space-y-2">
-                    <Label>Candidate Resume (URL)</Label>
-                    <Input value={formData.candidateResume} onChange={(e) => setFormData({ ...formData, candidateResume: e.target.value })} />
+                    <Label>Upload Resume *</Label>
+                    <div className="space-y-2">
+                      <input
+                        ref={resumeFileInputRef}
+                        type="file"
+                        id="resumeFile"
+                        accept=".docx,.pdf"
+                        onChange={handleResumeFileChange}
+                        className="hidden"
+                      />
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => resumeFileInputRef.current?.click()}
+                          disabled={uploadingResume || submitting}
+                          className="flex-1"
+                        >
+                          {uploadingResume ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              Processing...
+                            </>
+                          ) : (
+                            <>
+                              <Upload className="mr-2 h-4 w-4" />
+                              {resumeFile ? "Change File" : "Upload Resume"}
+                            </>
+                          )}
+                        </Button>
+                        {resumeFile && !uploadingResume && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => {
+                              setResumeFile(null);
+                              if (resumeFileInputRef.current) {
+                                resumeFileInputRef.current.value = "";
+                              }
+                            }}
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
+                      {resumeFile && (
+                        <div className="flex items-center gap-2 p-2 bg-muted rounded-md">
+                          <FileText className="h-4 w-4 text-muted-foreground" />
+                          <span className="text-sm text-muted-foreground truncate flex-1">
+                            {resumeFile.name}
+                          </span>
+                          <span className="text-xs text-muted-foreground">
+                            {(resumeFile.size / 1024).toFixed(2)} KB
+                          </span>
+                        </div>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Upload a .docx or .pdf file (max 10MB). .docx files will be converted to PDF automatically.
+                      </p>
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <Label>Documents</Label>
                     <Input value={formData.documents} onChange={(e) => setFormData({ ...formData, documents: e.target.value })} />
                   </div>
-                  <Button type="submit" className="w-full" disabled={submitting}>
-                    {submitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    Add Candidate
+                  <Button type="submit" className="w-full" disabled={submitting || uploadingResume}>
+                    {(submitting || uploadingResume) && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    {uploadingResume ? "Uploading Resume..." : submitting ? "Adding Candidate..." : "Add Candidate"}
                   </Button>
                 </form>
               </TabsContent>

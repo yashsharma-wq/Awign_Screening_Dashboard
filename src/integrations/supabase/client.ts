@@ -6,9 +6,12 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
-  console.error("Missing Supabase environment variables. Please check your .env file.");
-  console.error("VITE_SUPABASE_URL:", SUPABASE_URL ? "Set" : "Missing");
-  console.error("VITE_SUPABASE_PUBLISHABLE_KEY:", SUPABASE_PUBLISHABLE_KEY ? "Set" : "Missing");
+  console.error("❌ Missing Supabase environment variables. Please check your .env file.");
+  console.error("VITE_SUPABASE_URL:", SUPABASE_URL ? "✅ Set" : "❌ Missing");
+  console.error("VITE_SUPABASE_PUBLISHABLE_KEY:", SUPABASE_PUBLISHABLE_KEY ? "✅ Set" : "❌ Missing");
+  console.error("\n📝 To fix this, create a .env file in the root directory with:");
+  console.error("   VITE_SUPABASE_URL=your_supabase_url");
+  console.error("   VITE_SUPABASE_PUBLISHABLE_KEY=your_supabase_anon_key");
 }
 
 // Import the supabase client like this:
