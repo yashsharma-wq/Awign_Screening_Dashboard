@@ -11,11 +11,10 @@ import Dashboard from "./pages/Dashboard";
 import Jobs from "./pages/Jobs";
 import Candidates from "./pages/Candidates";
 import Applications from "./pages/Applications";
-import ResumeScoring from "./pages/ResumeScoring";
 import Screening from "./pages/Screening";
 import Analytics from "./pages/Analytics";
+import PMAnalytics from "./pages/PMAnalytics";
 import NotFound from "./pages/NotFound";
-import Uploader from "./pages/Uploader";
 
 const queryClient = new QueryClient();
 
@@ -29,15 +28,14 @@ const App = () => (
           <Routes>
             <Route path="/login" element={<Login />} />
             <Route path="/signup" element={<Signup />} />
+            <Route path="/pm-analytics" element={<PMAnalytics />} />
             <Route path="/" element={<Layout />}>
               <Route index element={<Dashboard />} />
               <Route path="jobs" element={<Jobs />} />
               <Route path="candidates" element={<Candidates />} />
               <Route path="applications" element={<Applications />} />
-              <Route path="resume-scoring" element={<ResumeScoring />} />
               <Route path="screening" element={<Screening />} />
               <Route path="analytics" element={<Analytics />} />
-              <Route path="uploader" element={<Uploader />} />
             </Route>
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />

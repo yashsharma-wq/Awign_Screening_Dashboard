@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: pm-analytics
+    env: static
+    buildCommand: npm install && npm run build:pm-analytics
+    staticPublishPath: ./dist-pm-analytics
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+

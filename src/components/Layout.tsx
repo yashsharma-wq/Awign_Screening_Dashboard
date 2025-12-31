@@ -3,7 +3,6 @@ import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { 
   LayoutDashboard, 
   Briefcase, 
@@ -15,8 +14,7 @@ import {
   X,
   FileSearch,
   FileText,
-  Loader2,
-  Upload
+  Loader2
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import AwignLogo from "./AwignLogo";
@@ -28,16 +26,6 @@ const Layout = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { toast } = useToast();
-
-  const getInitials = (email?: string | null) => {
-    if (!email) return "";
-    const localPart = email.split("@")[0] || "";
-    const parts = localPart.split(/[\W_]+/).filter(Boolean);
-    if (parts.length >= 2) {
-      return `${parts[0][0] || ""}${parts[1][0] || ""}`.toUpperCase();
-    }
-    return localPart.slice(0, 2).toUpperCase();
-  };
 
   useEffect(() => {
     // Check session - with persistSession: false, sessions won't persist across browser sessions
@@ -86,11 +74,9 @@ const Layout = () => {
 
   const navItems = [
     { to: "/", icon: LayoutDashboard, label: "Dashboard" },
-    { to: "/uploader", icon: Upload, label: "Bulk Upload" },
     { to: "/jobs", icon: Briefcase, label: "Jobs" },
     { to: "/candidates", icon: Users, label: "Candidates" },
     { to: "/applications", icon: FileText, label: "Applications" },
-    { to: "/resume-scoring", icon: FileSearch, label: "Resume Scoring" },
     { to: "/screening", icon: Target, label: "Screening" },
     { to: "/analytics", icon: BarChart3, label: "Analytics" },
   ];
@@ -117,10 +103,7 @@ const Layout = () => {
               <h1 className="text-lg sm:text-xl font-bold text-foreground tracking-tight whitespace-nowrap flex-shrink-0">
                 AI Screening
               </h1>
-              <nav
-                className="hidden md:flex items-center gap-2 ml-4 sm:ml-8 flex-shrink overflow-x-auto pr-2"
-                style={{ scrollbarWidth: "none" }}
-              >
+              <nav className="hidden md:flex items-center gap-1 ml-4 sm:ml-8 flex-shrink-0">
                 {navItems.map((item) => {
                   const Icon = item.icon;
                   const isActive = location.pathname === item.to;
@@ -129,7 +112,7 @@ const Layout = () => {
                       key={item.to}
                       to={item.to}
                       className={cn(
-                        "flex items-center gap-2 px-3 py-2 rounded-lg text-xs sm:text-sm font-medium transition-all duration-200 whitespace-nowrap flex-shrink-0",
+                        "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200",
                         isActive
                           ? "bg-primary text-primary-foreground shadow-md shadow-primary/20"
                           : "text-muted-foreground hover:bg-muted/60 hover:text-foreground"
@@ -143,16 +126,9 @@ const Layout = () => {
               </nav>
             </div>
             <div className="flex items-center gap-4">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="hidden md:block text-sm text-muted-foreground font-medium px-3 py-1.5 rounded-md bg-muted/50 cursor-default">
-                    {getInitials(user?.email) || "?"}
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p className="text-sm">{user?.email || "Unknown user"}</p>
-                </TooltipContent>
-              </Tooltip>
+              <span className="hidden md:block text-sm text-muted-foreground font-medium px-3 py-1.5 rounded-md bg-muted/50">
+                {user?.email}
+              </span>
               <Button 
                 variant="ghost" 
                 size="icon" 

@@ -7,8 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "build:dev": "vite build --mode development",
+    "build:pm-analytics": "vite build --config vite.config.pm-analytics.ts && node scripts/postbuild-pm-analytics.js",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "preview:pm-analytics": "vite preview --outDir dist-pm-analytics --port 4173"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
