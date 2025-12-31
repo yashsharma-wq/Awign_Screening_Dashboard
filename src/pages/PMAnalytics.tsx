@@ -2,10 +2,14 @@ import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Loader2, TrendingUp, Users, Target, Award, RefreshCw, CheckCircle, XCircle, Clock, AlertCircle } from "lucide-react";
+
+type TimeFilter = "today" | "weekly" | "monthly" | "all";
 
 const PMAnalytics = () => {
   const [loading, setLoading] = useState(true);
+  const [timeFilter, setTimeFilter] = useState<TimeFilter>("all");
   const [analytics, setAnalytics] = useState({
     totalApplications: 0,
     totalScreened: 0,
@@ -18,27 +22,77 @@ const PMAnalytics = () => {
     passRate: 0,
   });
 
+  // Get date range based on filter
+  const getDateRange = (filter: TimeFilter) => {
+    const now = new Date();
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+
+    switch (filter) {
+      case "today":
+        return {
+          start: startOfDay.toISOString(),
+          end: now.toISOString(),
+        };
+      case "weekly":
+        const startOfWeek = new Date(now);
+        startOfWeek.setDate(now.getDate() - 7);
+        startOfWeek.setHours(0, 0, 0, 0);
+        return {
+          start: startOfWeek.toISOString(),
+          end: now.toISOString(),
+        };
+      case "monthly":
+        const startOfMonth = new Date(now);
+        startOfMonth.setDate(1);
+        startOfMonth.setHours(0, 0, 0, 0);
+        return {
+          start: startOfMonth.toISOString(),
+          end: now.toISOString(),
+        };
+      case "all":
+      default:
+        return null; // No date filter
+    }
+  };
+
   useEffect(() => {
     fetchAnalytics();
-  }, []);
+  }, [timeFilter]);
 
   const fetchAnalytics = async () => {
     try {
       setLoading(true);
 
-      // 1. Total Applications: total rows in 'AEX_Candidate_Data'
-      const { count: totalApplications, error: applicationsError } = await supabase
+      const dateRange = getDateRange(timeFilter);
+      let applicationsQuery = supabase
         .from("AEX_Candidate_Data")
         .select("*", { count: "exact", head: true });
+      
+      let screenedQuery = supabase
+        .from("AEX_Screening_Batch_Queue")
+        .select("*", { count: "exact", head: true });
+
+      // Apply date filter if not "all"
+      if (dateRange) {
+        applicationsQuery = applicationsQuery
+          .gte("created_at", dateRange.start)
+          .lte("created_at", dateRange.end);
+        
+        screenedQuery = screenedQuery
+          .gte("created_at", dateRange.start)
+          .lte("created_at", dateRange.end);
+      }
+
+      // 1. Total Applications: total rows in 'AEX_Candidate_Data'
+      const { count: totalApplications, error: applicationsError } = await applicationsQuery;
 
       if (applicationsError) {
         console.error("Error fetching applications count:", applicationsError);
       }
 
       // 2. Total Screened: total rows in 'AEX_Screening_Batch_Queue'
-      const { count: totalScreened, error: screenedError } = await supabase
-        .from("AEX_Screening_Batch_Queue")
-        .select("*", { count: "exact", head: true });
+      const { count: totalScreened, error: screenedError } = await screenedQuery;
 
       if (screenedError) {
         console.error("Error fetching screened count:", screenedError);
@@ -47,28 +101,84 @@ const PMAnalytics = () => {
       // 3. Average Score: average of 'Final Score' in 'AEX_Screening_Tracker'
       let trackerData: any[] | null = null;
       
-      let trackerResult = await supabase
+      let trackerResult = supabase
         .from("AEX_Screening_Tracker")
         .select("*");
       
-      if (trackerResult.error) {
-        // Fallback to lowercase table name
-        trackerResult = await supabase
-          .from("screening_tracker")
-          .select("*");
+      // Apply date filter if not "all"
+      if (dateRange) {
+        trackerResult = trackerResult
+          .gte("created_at", dateRange.start)
+          .lte("created_at", dateRange.end);
       }
       
-      trackerData = trackerResult.data || null;
+      let result = await trackerResult;
+      
+      if (result.error) {
+        // Fallback to lowercase table name
+        let fallbackResult = supabase
+          .from("screening_tracker")
+          .select("*");
+        
+        if (dateRange) {
+          fallbackResult = fallbackResult
+            .gte("created_at", dateRange.start)
+            .lte("created_at", dateRange.end);
+        }
+        
+        result = await fallbackResult;
+      }
+      
+      trackerData = result.data || null;
 
-      if (trackerResult.error) {
-        console.error("Error fetching tracker data:", trackerResult.error);
+      if (result.error) {
+        console.error("Error fetching tracker data:", result.error);
+      }
+      
+      // Always filter by date range if specified (double-check to ensure accuracy)
+      if (dateRange && trackerData && trackerData.length > 0) {
+        const startDate = new Date(dateRange.start);
+        const endDate = new Date(dateRange.end);
+        
+        trackerData = trackerData.filter((item: any) => {
+          // Try multiple date fields
+          const itemDate = item.created_at || item.timestamp;
+          if (!itemDate) return false;
+          
+          const itemDateObj = new Date(itemDate);
+          // Set time to start of day for comparison
+          itemDateObj.setHours(0, 0, 0, 0);
+          const start = new Date(startDate);
+          start.setHours(0, 0, 0, 0);
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          
+          return itemDateObj >= start && itemDateObj <= end;
+        });
       }
 
-      // Calculate average score from tracker data
+      // Calculate average score from tracker data (already filtered by date)
       let averageScore = 0;
       if (trackerData && trackerData.length > 0) {
         const scores = trackerData
           .map((t: any) => {
+            // Verify date matches filter first
+            if (dateRange) {
+              const itemDate = t.created_at || t.timestamp;
+              if (!itemDate) return null;
+              
+              const itemDateObj = new Date(itemDate);
+              itemDateObj.setHours(0, 0, 0, 0);
+              const startDate = new Date(dateRange.start);
+              startDate.setHours(0, 0, 0, 0);
+              const endDate = new Date(dateRange.end);
+              endDate.setHours(23, 59, 59, 999);
+              
+              if (itemDateObj < startDate || itemDateObj > endDate) {
+                return null;
+              }
+            }
+            
             // Try both formats: with space and snake_case
             const score = t["Final Score"] ?? t.final_score;
             // Handle string numbers
@@ -86,30 +196,54 @@ const PMAnalytics = () => {
       }
 
       // 4. Pending: total rows in 'AEX_Candidate_Data' with JD_Mapping='NOT STARTED'
-      const { count: pending, error: pendingError } = await supabase
+      let pendingQuery = supabase
         .from("AEX_Candidate_Data")
         .select("*", { count: "exact", head: true })
         .eq("JD_Mapping", "NOT STARTED");
+      
+      if (dateRange) {
+        pendingQuery = pendingQuery
+          .gte("created_at", dateRange.start)
+          .lte("created_at", dateRange.end);
+      }
+      
+      const { count: pending, error: pendingError } = await pendingQuery;
 
       if (pendingError) {
         console.error("Error fetching pending count:", pendingError);
       }
 
       // 5. Completed: total rows in 'AEX_Screening_Batch_Queue' with Status='Completed'
-      const { count: completed, error: completedError } = await supabase
+      let completedQuery = supabase
         .from("AEX_Screening_Batch_Queue")
         .select("*", { count: "exact", head: true })
         .eq("Status", "Completed");
+      
+      if (dateRange) {
+        completedQuery = completedQuery
+          .gte("created_at", dateRange.start)
+          .lte("created_at", dateRange.end);
+      }
+      
+      const { count: completed, error: completedError } = await completedQuery;
       
       if (completedError) {
         console.error("Error fetching completed count:", completedError);
       }
 
       // 6. No Response: total rows in 'AEX_Screening_Batch_Queue' with Status='Waiting'
-      const { count: noResponse, error: noResponseError } = await supabase
+      let noResponseQuery = supabase
         .from("AEX_Screening_Batch_Queue")
         .select("*", { count: "exact", head: true })
         .eq("Status", "Waiting");
+      
+      if (dateRange) {
+        noResponseQuery = noResponseQuery
+          .gte("created_at", dateRange.start)
+          .lte("created_at", dateRange.end);
+      }
+      
+      const { count: noResponse, error: noResponseError } = await noResponseQuery;
       
       if (noResponseError) {
         console.error("Error fetching no response count:", noResponseError);
@@ -118,86 +252,195 @@ const PMAnalytics = () => {
       // 7. Rejected: total rows in 'AEX_Screening_Tracker' with Screening_Outcome='Not Suitable'
       let rejected = 0;
       
-      // First try to calculate from fetched tracker data (most reliable)
+      // Always calculate from fetched tracker data (already filtered by date)
       if (trackerData && trackerData.length > 0) {
-        rejected = trackerData.filter((t: any) => {
+        // Double-check date filter for rejected entries
+        let filteredRejected = trackerData.filter((t: any) => {
           const outcome = t["Screening_Outcome"] ?? t["Screening Outcome"] ?? t.screening_outcome;
-          return outcome && outcome.toString().trim() === "Not Suitable";
-        }).length;
+          if (!outcome || outcome.toString().trim() !== "Not Suitable") {
+            return false;
+          }
+          
+          // Verify date matches filter
+          if (dateRange) {
+            const itemDate = t.created_at || t.timestamp;
+            if (!itemDate) return false;
+            
+            const itemDateObj = new Date(itemDate);
+            itemDateObj.setHours(0, 0, 0, 0);
+            const startDate = new Date(dateRange.start);
+            startDate.setHours(0, 0, 0, 0);
+            const endDate = new Date(dateRange.end);
+            endDate.setHours(23, 59, 59, 999);
+            
+            return itemDateObj >= startDate && itemDateObj <= endDate;
+          }
+          
+          return true;
+        });
+        
+        rejected = filteredRejected.length;
       } else {
         // Fallback: Try count queries with different column name formats
-        let rejectedResult = await supabase
+        let rejectedResult = supabase
           .from("AEX_Screening_Tracker")
           .select("*", { count: "exact", head: true })
           .eq("Screening_Outcome", "Not Suitable");
         
-        if (rejectedResult.error) {
+        // Apply date filter if not "all"
+        if (dateRange) {
+          rejectedResult = rejectedResult
+            .gte("created_at", dateRange.start)
+            .lte("created_at", dateRange.end);
+        }
+        
+        let result = await rejectedResult;
+        
+        if (result.error) {
           // Try with space in column name
-          rejectedResult = await supabase
+          let rejectedResult2 = supabase
             .from("AEX_Screening_Tracker")
             .select("*", { count: "exact", head: true })
             .eq("Screening Outcome", "Not Suitable");
+          
+          if (dateRange) {
+            rejectedResult2 = rejectedResult2
+              .gte("created_at", dateRange.start)
+              .lte("created_at", dateRange.end);
+          }
+          
+          result = await rejectedResult2;
         }
         
-        if (rejectedResult.error) {
+        if (result.error) {
           // Try snake_case column name
-          rejectedResult = await supabase
+          let rejectedResult3 = supabase
             .from("AEX_Screening_Tracker")
             .select("*", { count: "exact", head: true })
             .eq("screening_outcome", "Not Suitable");
+          
+          if (dateRange) {
+            rejectedResult3 = rejectedResult3
+              .gte("created_at", dateRange.start)
+              .lte("created_at", dateRange.end);
+          }
+          
+          result = await rejectedResult3;
         }
         
-        if (rejectedResult.error) {
+        if (result.error) {
           // Try lowercase table name
-          rejectedResult = await supabase
+          let rejectedResult4 = supabase
             .from("screening_tracker")
             .select("*", { count: "exact", head: true })
             .eq("screening_outcome", "Not Suitable");
+          
+          if (dateRange) {
+            rejectedResult4 = rejectedResult4
+              .gte("created_at", dateRange.start)
+              .lte("created_at", dateRange.end);
+          }
+          
+          result = await rejectedResult4;
         }
         
-        rejected = rejectedResult.count || 0;
-        if (rejectedResult.error) {
-          console.error("Error fetching rejected count:", rejectedResult.error);
+        rejected = result.count || 0;
+        if (result.error) {
+          console.error("Error fetching rejected count:", result.error);
         }
       }
 
       // 8. Qualified: total rows in 'AEX_Screening_Tracker' with Screening_Outcome != 'Not Suitable'
       let qualified = 0;
       if (trackerData && trackerData.length > 0) {
-        // Calculate from fetched data
-        qualified = trackerData.filter((t: any) => {
+        // Calculate from fetched data with date verification
+        let filteredQualified = trackerData.filter((t: any) => {
           const outcome = t["Screening_Outcome"] ?? t["Screening Outcome"] ?? t.screening_outcome;
-          return outcome && outcome.toString().trim() !== "Not Suitable" && outcome.toString().trim() !== "";
-        }).length;
+          if (!outcome || outcome.toString().trim() === "Not Suitable" || outcome.toString().trim() === "") {
+            return false;
+          }
+          
+          // Verify date matches filter
+          if (dateRange) {
+            const itemDate = t.created_at || t.timestamp;
+            if (!itemDate) return false;
+            
+            const itemDateObj = new Date(itemDate);
+            itemDateObj.setHours(0, 0, 0, 0);
+            const startDate = new Date(dateRange.start);
+            startDate.setHours(0, 0, 0, 0);
+            const endDate = new Date(dateRange.end);
+            endDate.setHours(23, 59, 59, 999);
+            
+            return itemDateObj >= startDate && itemDateObj <= endDate;
+          }
+          
+          return true;
+        });
+        
+        qualified = filteredQualified.length;
       } else {
         // Fallback: Try query approach
-        let qualifiedResult = await supabase
+        let qualifiedResult = supabase
           .from("AEX_Screening_Tracker")
           .select("*", { count: "exact", head: true })
           .neq("Screening_Outcome", "Not Suitable");
         
-        if (qualifiedResult.error) {
-          qualifiedResult = await supabase
+        // Apply date filter if not "all"
+        if (dateRange) {
+          qualifiedResult = qualifiedResult
+            .gte("created_at", dateRange.start)
+            .lte("created_at", dateRange.end);
+        }
+        
+        let result = await qualifiedResult;
+        
+        if (result.error) {
+          let qualifiedResult2 = supabase
             .from("AEX_Screening_Tracker")
             .select("*", { count: "exact", head: true })
             .neq("Screening Outcome", "Not Suitable");
+          
+          if (dateRange) {
+            qualifiedResult2 = qualifiedResult2
+              .gte("created_at", dateRange.start)
+              .lte("created_at", dateRange.end);
+          }
+          
+          result = await qualifiedResult2;
         }
         
-        if (qualifiedResult.error) {
-          qualifiedResult = await supabase
+        if (result.error) {
+          let qualifiedResult3 = supabase
             .from("AEX_Screening_Tracker")
             .select("*", { count: "exact", head: true })
             .neq("screening_outcome", "Not Suitable");
+          
+          if (dateRange) {
+            qualifiedResult3 = qualifiedResult3
+              .gte("created_at", dateRange.start)
+              .lte("created_at", dateRange.end);
+          }
+          
+          result = await qualifiedResult3;
         }
         
-        if (qualifiedResult.error) {
-          qualifiedResult = await supabase
+        if (result.error) {
+          let qualifiedResult4 = supabase
             .from("screening_tracker")
             .select("*", { count: "exact", head: true })
             .neq("screening_outcome", "Not Suitable");
+          
+          if (dateRange) {
+            qualifiedResult4 = qualifiedResult4
+              .gte("created_at", dateRange.start)
+              .lte("created_at", dateRange.end);
+          }
+          
+          result = await qualifiedResult4;
         }
         
-        qualified = qualifiedResult.count || 0;
+        qualified = result.count || 0;
       }
 
       // 9. Pass Rate: (Qualified/(Qualified+Rejected))*100
@@ -301,14 +544,24 @@ const PMAnalytics = () => {
               Analytics and metrics overview dashboard
             </p>
           </div>
-          <Button onClick={fetchAnalytics} variant="outline" disabled={loading}>
-            {loading ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <RefreshCw className="mr-2 h-4 w-4" />
-            )}
-            Refresh
-          </Button>
+          <div className="flex items-center gap-4">
+            <Tabs value={timeFilter} onValueChange={(value) => setTimeFilter(value as TimeFilter)}>
+              <TabsList>
+                <TabsTrigger value="today">Today</TabsTrigger>
+                <TabsTrigger value="weekly">Weekly</TabsTrigger>
+                <TabsTrigger value="monthly">Monthly</TabsTrigger>
+                <TabsTrigger value="all">All</TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <Button onClick={fetchAnalytics} variant="outline" disabled={loading}>
+              {loading ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-2 h-4 w-4" />
+              )}
+              Refresh
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
